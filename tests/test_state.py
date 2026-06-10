@@ -49,3 +49,26 @@ def test_state_persists(tmp_path: Path):
     state.update_feed("http://example/feed", [_item("x")], max_items=30)
     state.save()
     assert len(RssState(path).get_cached_items("http://example/feed")) == 1
+
+
+def test_seen_ids_pruned_after_update(tmp_path: Path):
+    state = RssState(tmp_path / "rss_state.json")
+    feed_url = "http://example/feed"
+    initial = [_item(f"id-{index}") for index in range(10)]
+    state.update_feed(feed_url, initial, max_items=5, max_seen_ids=8)
+
+    more = [_item(f"id-{index}") for index in range(10, 20)]
+    state.update_feed(feed_url, more, max_items=5, max_seen_ids=8)
+
+    seen = state.get_feed_state(feed_url).seen_ids
+    assert len(seen) <= 8
+    cached_ids = {item.id for item in state.get_cached_items(feed_url)}
+    assert cached_ids.issubset(set(seen))
+
+
+def test_refresh_cache_prunes_seen_ids(tmp_path: Path):
+    state = RssState(tmp_path / "rss_state.json")
+    feed_url = "http://example/feed"
+    state.update_feed(feed_url, [_item(f"id-{i}") for i in range(20)], max_items=3, max_seen_ids=6)
+    state.refresh_cache(feed_url, [_item(f"new-{i}") for i in range(5)], max_items=3, max_seen_ids=6)
+    assert len(state.get_feed_state(feed_url).seen_ids) <= 6

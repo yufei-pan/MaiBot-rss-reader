@@ -7,8 +7,10 @@ MaiBot 第三方插件：订阅 RSS 源，将新内容注入 Maisaka 上下文�
 - 按可配置间隔全局拉取 RSS（客户端 pull）
 - 按 **聊天流（stream_id）** 配置多个 RSS 源
 - 新内容：聚合、排序、格式化后注入 Maisaka 上下文，并触发一次 proactive（每 stream 每轮最多一次）
-- 麦麦可通过 `query_rss_feeds` 工具主动查询完整订阅
+- 麦麦可通过 `query_rss_feeds` 工具主动查询完整订阅（支持关键词过滤）
+- 麦麦可通过 `add_rss_feed` 工具为当前聊天流添加订阅（写入本地 `rss_bot_feeds.json`，不修改 `config.toml`）
 - 用户可在已配置的聊天流中使用 `/rss` 命令查看订阅
+- 用户可在任意聊天流发送 `/rss_list` 查看配置文件与麦麦自行添加的订阅列表
 - 用户可在任意聊天流发送 `/rss_stream_id` 获取该流的 ID（便于填写配置）
 
 ## 安装
@@ -55,6 +57,7 @@ pip install 'feedparser>=6.0.0'
 ```toml
 [rss]
 poll_interval_seconds = 300
+max_seen_ids_per_feed = 500   # 每个 feed 已见 ID 上限，防止 rss_state.json 无限增长
 
 # 第一个聊天流：订阅两个 RSS 源
 [[rss.streams]]
@@ -98,11 +101,28 @@ enabled = true
 - **首次拉取**：某 feed 第一次被拉取时只建立基线（记录已见条目），不会触发 proactive，避免启动时轰炸用户
 - **新内容通知**：仅对真正的新条目注入上下文并触发 proactive；intent 为建议式语气，由麦麦自行决定是否告知用户
 - **plastic-memory**：本插件不依赖便利贴插件；默认可在 `proactive_intent_template` 中提示麦麦可自行使用备忘工具
-- **未配置 stream**：`/rss` 命令静默无响应；Tool 返回「未配置」提示
+- **未配置 stream**：`/rss` 命令静默无响应；`query_rss_feeds` 返回「没有 RSS 订阅」提示
+- **双来源订阅**：`config.toml` 中的订阅与麦麦通过 `add_rss_feed` 添加的订阅在运行时合并；后者保存在 `rss_bot_feeds.json`（已 gitignore）
+- **`rss_state.json` 体积**：`items` 缓存按 `max_items_per_feed` 有界；`seen_ids` 按 `max_seen_ids_per_feed`（默认 500）裁剪，长期运行体量可预测
+
+### 工具与命令
+
+| 名称 | 说明 |
+| --- | --- |
+| `add_rss_feed` | 校验 URL 后为当前聊天流添加 RSS；重复 URL 返回「已订阅」 |
+| `query_rss_feeds` | 查询当前流订阅；可选 `feed_name`、`keywords`（空格/逗号分隔，任意关键词匹配标题/摘要等字段） |
+| `/rss` | 向用户发送当前流合并后的订阅内容 |
+| `/rss_list` | 分开展示配置文件订阅与麦麦自行添加的订阅 |
+| `/rss_stream_id` | 返回当前聊天流 `stream_id` |
 
 ## 目录结构
 
-单文件插件，所有逻辑在 `plugin.py` 中；运行时状态写入同目录下的 `rss_state.json`。
+单文件插件，所有逻辑在 `plugin.py` 中。运行时数据：
+
+| 文件 | 用途 |
+| --- | --- |
+| `rss_state.json` | 各 feed 的缓存条目与已见 ID（gitignore） |
+| `rss_bot_feeds.json` | 麦麦通过工具添加的订阅（gitignore） |
 
 ## 开发与测试
 

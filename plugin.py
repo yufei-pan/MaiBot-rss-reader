@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
 from typing import Any, Protocol, Sequence
+from urllib.parse import urlparse
 
 import httpx
 
@@ -118,8 +119,7 @@ def _get_feedparser() -> Any:
     return feedparser
 
 
-def parse_feed_content(content: bytes, feed_url: str, feed_name: str = "") -> list[RssItem]:
-    parsed = _get_feedparser().parse(content)
+def _items_from_parsed(parsed: Any, feed_url: str, feed_name: str = "") -> tuple[str, list[RssItem]]:
     resolved_name = (feed_name or getattr(parsed.feed, "title", "") or feed_url).strip()
     items: list[RssItem] = []
     for entry in parsed.entries:
@@ -134,7 +134,54 @@ def parse_feed_content(content: bytes, feed_url: str, feed_name: str = "") -> li
                 feed_url=feed_url,
             )
         )
+    return resolved_name, items
+
+
+def parse_feed_content(content: bytes, feed_url: str, feed_name: str = "") -> list[RssItem]:
+    parsed = _get_feedparser().parse(content)
+    _, items = _items_from_parsed(parsed, feed_url, feed_name)
     return items
+
+
+def validate_feed_bytes(content: bytes, feed_url: str, feed_name: str = "") -> tuple[str, list[RssItem]]:
+    """校验响应体为可解析的 RSS/Atom，并返回 feed 标题与条目。"""
+    parsed = _get_feedparser().parse(content)
+    has_feed = bool(getattr(parsed, "feed", None) and getattr(parsed.feed, "title", None))
+    has_entries = bool(parsed.entries)
+    if getattr(parsed, "bozo", False) and not has_entries and not has_feed:
+        exc = getattr(parsed, "bozo_exception", None)
+        raise ValueError(f"RSS 解析失败: {exc or '格式无效'}")
+    if not has_feed and not has_entries:
+        raise ValueError("响应内容不是有效的 RSS/Atom feed")
+    return _items_from_parsed(parsed, feed_url, feed_name)
+
+
+async def validate_feed_url(
+    url: str,
+    *,
+    timeout: float = 20.0,
+    feed_name: str = "",
+    client: httpx.AsyncClient | None = None,
+) -> tuple[str, list[RssItem]]:
+    """拉取并校验 RSS URL，返回 (feed 标题, 条目列表)。"""
+    normalized = url.strip()
+    parsed_url = urlparse(normalized)
+    if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
+        raise ValueError("URL 必须是有效的 http/https 地址")
+
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(follow_redirects=True)
+    try:
+        response = await client.get(normalized, timeout=timeout)
+        response.raise_for_status()
+        content_type = response.headers.get("content-type", "").lower()
+        if content_type and "html" in content_type and "xml" not in content_type and "rss" not in content_type:
+            raise ValueError(f"URL 返回 HTML 而非 RSS/XML（Content-Type: {content_type}）")
+        return await asyncio.to_thread(validate_feed_bytes, response.content, normalized, feed_name)
+    finally:
+        if owns_client:
+            await client.aclose()
 
 
 async def fetch_feed(
@@ -188,6 +235,40 @@ def _parse_published(value: str) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def parse_keywords(raw: str) -> list[str]:
+    """将逗号或空格分隔的关键词字符串解析为列表。"""
+    if not raw or not raw.strip():
+        return []
+    parts = re.split(r"[,，\s]+", raw.strip())
+    return [part for part in parts if part]
+
+
+def _item_searchable_text(item: RssItem) -> str:
+    return "\n".join(
+        [
+            item.id,
+            item.title,
+            item.link,
+            item.summary,
+            item.published,
+            item.feed_name,
+        ]
+    )
+
+
+def filter_items_by_keywords(items: Sequence[RssItem], keywords: Sequence[str]) -> list[RssItem]:
+    """任意关键词匹配任意可搜索字段（不含 feed_url）则保留。"""
+    normalized = [kw.strip().lower() for kw in keywords if kw and kw.strip()]
+    if not normalized:
+        return list(items)
+    result: list[RssItem] = []
+    for item in items:
+        haystack = _item_searchable_text(item).lower()
+        if any(keyword in haystack for keyword in normalized):
+            result.append(item)
+    return result
 
 
 def sort_items_by_published(items: Sequence[RssItem]) -> list[RssItem]:
@@ -325,6 +406,110 @@ def _item_from_dict(data: dict[str, Any]) -> RssItem:
     )
 
 
+def _prune_seen_ids(seen_ids: list[str], item_ids: set[str], max_seen: int) -> list[str]:
+    """裁剪 seen_ids，优先保留当前缓存条目 ID。"""
+    if max_seen <= 0:
+        return list(dict.fromkeys(seen_ids))
+    ordered = list(dict.fromkeys(seen_ids))
+    if len(ordered) <= max_seen:
+        return ordered
+    priority = [item_id for item_id in ordered if item_id in item_ids]
+    others = [item_id for item_id in ordered if item_id not in item_ids]
+    slots_for_others = max(0, max_seen - len(priority))
+    return priority + others[-slots_for_others:]
+
+
+@dataclass
+class BotFeedEntry:
+    url: str
+    name: str
+    added_at: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"url": self.url, "name": self.name, "added_at": self.added_at}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> BotFeedEntry:
+        return cls(
+            url=str(data.get("url", "") or "").strip(),
+            name=str(data.get("name", "") or "").strip(),
+            added_at=str(data.get("added_at", "") or "").strip(),
+        )
+
+
+class BotFeedsStore:
+    """麦麦通过工具自行添加的 RSS 订阅（独立于 config.toml）。"""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._streams: dict[str, list[BotFeedEntry]] = {}
+        self.load()
+
+    def load(self) -> None:
+        if not self._path.exists():
+            self._streams = {}
+            return
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            self._streams = {}
+            return
+        streams_raw = raw.get("streams", {})
+        if not isinstance(streams_raw, dict):
+            self._streams = {}
+            return
+        self._streams = {}
+        for stream_id, payload in streams_raw.items():
+            feeds_raw = payload.get("feeds", []) if isinstance(payload, dict) else []
+            feeds = [
+                BotFeedEntry.from_dict(entry)
+                for entry in feeds_raw
+                if isinstance(entry, dict) and str(entry.get("url", "")).strip()
+            ]
+            if feeds:
+                self._streams[str(stream_id)] = feeds
+
+    def save(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "streams": {
+                stream_id: {"feeds": [entry.to_dict() for entry in feeds]}
+                for stream_id, feeds in self._streams.items()
+            },
+        }
+        temp_path = self._path.with_suffix(self._path.suffix + ".tmp")
+        temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temp_path, self._path)
+
+    def all_stream_ids(self) -> set[str]:
+        return set(self._streams.keys())
+
+    def get_feeds(self, stream_id: str) -> list[tuple[str, str]]:
+        normalized = (stream_id or "").strip()
+        return [(entry.url, entry.name) for entry in self._streams.get(normalized, [])]
+
+    def has_url(self, stream_id: str, url: str) -> bool:
+        normalized_url = url.strip()
+        return any(feed_url == normalized_url for feed_url, _ in self.get_feeds(stream_id))
+
+    def add_feed(self, stream_id: str, url: str, name: str) -> bool:
+        """追加订阅；若 URL 已存在则返回 False。"""
+        normalized_stream = (stream_id or "").strip()
+        normalized_url = url.strip()
+        if not normalized_stream or not normalized_url:
+            return False
+        if self.has_url(normalized_stream, normalized_url):
+            return False
+        entry = BotFeedEntry(
+            url=normalized_url,
+            name=name.strip(),
+            added_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self._streams.setdefault(normalized_stream, []).append(entry)
+        return True
+
+
 class RssState:
     def __init__(self, path: Path) -> None:
         self._path = path
@@ -370,29 +555,38 @@ class RssState:
         fetched_items: list[RssItem],
         *,
         max_items: int,
+        max_seen_ids: int = 500,
     ) -> tuple[list[RssItem], bool]:
         state = self.get_feed_state(feed_url)
         seen = set(state.seen_ids)
         trimmed = fetched_items[:max_items] if max_items > 0 else fetched_items
         state.items = [_item_to_dict(item) for item in trimmed]
         state.last_fetch = datetime.now(timezone.utc).isoformat()
+        item_ids = {item.id for item in trimmed}
 
         if not state.initialized:
             for item in trimmed:
                 seen.add(item.id)
-            state.seen_ids = list(seen)
+            state.seen_ids = _prune_seen_ids(list(seen), item_ids, max_seen_ids)
             state.initialized = True
             self._feeds[feed_url] = state
             return [], False
 
         new_items = [item for item in trimmed if item.id not in seen]
-        for item in new_items:
+        for item in trimmed:
             seen.add(item.id)
-        state.seen_ids = list(seen)
+        state.seen_ids = _prune_seen_ids(list(seen), item_ids, max_seen_ids)
         self._feeds[feed_url] = state
         return new_items, bool(new_items)
 
-    def refresh_cache(self, feed_url: str, fetched_items: list[RssItem], *, max_items: int) -> None:
+    def refresh_cache(
+        self,
+        feed_url: str,
+        fetched_items: list[RssItem],
+        *,
+        max_items: int,
+        max_seen_ids: int = 500,
+    ) -> None:
         state = self.get_feed_state(feed_url)
         trimmed = fetched_items[:max_items] if max_items > 0 else fetched_items
         state.items = [_item_to_dict(item) for item in trimmed]
@@ -400,7 +594,8 @@ class RssState:
         seen = set(state.seen_ids)
         for item in trimmed:
             seen.add(item.id)
-        state.seen_ids = list(seen)
+        item_ids = {item.id for item in trimmed}
+        state.seen_ids = _prune_seen_ids(list(seen), item_ids, max_seen_ids)
         if trimmed and not state.initialized:
             state.initialized = True
         self._feeds[feed_url] = state
@@ -454,6 +649,11 @@ class RssSectionConfig(PluginConfigBase):
     request_timeout_seconds: float = Field(default=20.0, ge=1.0, description="HTTP 请求超时（秒）")
     max_concurrent_fetches: int = Field(default=5, ge=1, description="并行拉取上限")
     max_items_per_feed: int = Field(default=30, ge=1, description="每个 feed 缓存/返回的最大条目数")
+    max_seen_ids_per_feed: int = Field(
+        default=500,
+        ge=50,
+        description="每个 feed 保留的已见条目 ID 上限（防止 rss_state.json 无限增长）",
+    )
     proactive_intent_template: str = Field(
         default=DEFAULT_PROACTIVE_INTENT_TEMPLATE,
         description="proactive.trigger 的 intent 模板",
@@ -491,12 +691,14 @@ class RssReaderPlugin(MaiBotPlugin):
         super().__init__()
         self._plugin_dir = Path(__file__).resolve().parent
         self._state: RssState | None = None
+        self._bot_feeds: BotFeedsStore | None = None
         self._poll_task: asyncio.Task[None] | None = None
         self._poll_stop = asyncio.Event()
         self._fetch_semaphore: asyncio.Semaphore | None = None
 
     async def on_load(self) -> None:
         self._state = RssState(self._plugin_dir / "rss_state.json")
+        self._bot_feeds = BotFeedsStore(self._plugin_dir / "rss_bot_feeds.json")
         self._fetch_semaphore = asyncio.Semaphore(max(1, self.config.rss.max_concurrent_fetches))
         self._restart_poll_loop()
         self.ctx.logger.info("麦麦 RSS 阅读器插件已加载")
@@ -515,28 +717,65 @@ class RssReaderPlugin(MaiBotPlugin):
     def _is_enabled(self) -> bool:
         return bool(self.config.plugin.enabled)
 
-    def _get_stream_config(self, stream_id: str) -> StreamRssConfig | None:
+    def _max_seen_ids(self) -> int:
+        return max(50, int(self.config.rss.max_seen_ids_per_feed))
+
+    def _feeds_from_config(self, stream_id: str) -> list[tuple[str, str]]:
         normalized = (stream_id or "").strip()
         if not normalized:
-            return None
+            return []
+        for stream in self.config.rss.streams:
+            if stream.stream_id.strip() != normalized:
+                continue
+            return [
+                (feed.url.strip(), feed.name.strip())
+                for feed in stream.feeds
+                if feed.url.strip()
+            ]
+        return []
+
+    def _feeds_from_bot(self, stream_id: str) -> list[tuple[str, str]]:
+        if self._bot_feeds is None:
+            return []
+        return self._bot_feeds.get_feeds(stream_id)
+
+    def _effective_feeds_for_stream(self, stream_id: str) -> list[tuple[str, str]]:
+        """合并 config（需 enabled）与 bot 自添加订阅，URL 去重，config 名称优先。"""
+        normalized = (stream_id or "").strip()
+        if not normalized:
+            return []
+        merged: dict[str, str] = {}
         for stream in self.config.rss.streams:
             if stream.stream_id.strip() == normalized and stream.enabled:
-                return stream
-        return None
+                for feed in stream.feeds:
+                    url = feed.url.strip()
+                    if url:
+                        merged[url] = feed.name.strip()
+        for url, name in self._feeds_from_bot(normalized):
+            if url not in merged:
+                merged[url] = name
+        return list(merged.items())
+
+    def _all_poll_stream_ids(self) -> set[str]:
+        stream_ids: set[str] = set()
+        for stream in self.config.rss.streams:
+            if stream.enabled:
+                stream_id = stream.stream_id.strip()
+                if stream_id:
+                    stream_ids.add(stream_id)
+        if self._bot_feeds is not None:
+            stream_ids.update(self._bot_feeds.all_stream_ids())
+        return stream_ids
+
+    def _has_effective_feed_url(self, stream_id: str, url: str) -> bool:
+        normalized_url = url.strip()
+        return any(feed_url == normalized_url for feed_url, _ in self._effective_feeds_for_stream(stream_id))
 
     def _collect_feed_index(self) -> dict[str, list[tuple[str, str]]]:
         index: dict[str, list[tuple[str, str]]] = {}
-        for stream in self.config.rss.streams:
-            if not stream.enabled:
-                continue
-            stream_id = stream.stream_id.strip()
-            if not stream_id:
-                continue
-            for feed in stream.feeds:
-                url = feed.url.strip()
-                if not url:
-                    continue
-                index.setdefault(url, []).append((stream_id, feed.name.strip()))
+        for stream_id in self._all_poll_stream_ids():
+            for url, name in self._effective_feeds_for_stream(stream_id):
+                index.setdefault(url, []).append((stream_id, name))
         return index
 
     def _restart_poll_loop(self) -> None:
@@ -620,7 +859,9 @@ class RssReaderPlugin(MaiBotPlugin):
                 self.ctx.logger.warning("拉取 RSS 失败 url=%s: %s", url, exc)
                 return {}
 
-        new_items, _ = self._state.update_feed(url, items, max_items=max_items)
+        new_items, _ = self._state.update_feed(
+            url, items, max_items=max_items, max_seen_ids=self._max_seen_ids()
+        )
         if not new_items:
             return {}
         return {stream_id: list(new_items) for stream_id, _ in bindings}
@@ -655,7 +896,7 @@ class RssReaderPlugin(MaiBotPlugin):
             },
         )
 
-    async def _refresh_stream_feeds(self, stream_cfg: StreamRssConfig) -> None:
+    async def _refresh_stream_feeds(self, stream_id: str) -> None:
         if self._state is None:
             return
         timeout = float(self.config.rss.request_timeout_seconds)
@@ -663,64 +904,143 @@ class RssReaderPlugin(MaiBotPlugin):
         poll_interval = int(self.config.rss.poll_interval_seconds)
 
         async with httpx.AsyncClient(follow_redirects=True) as client:
-            for feed in stream_cfg.feeds:
-                url = feed.url.strip()
-                if not url or not self._state.is_stale(url, poll_interval):
+            for url, name in self._effective_feeds_for_stream(stream_id):
+                if not self._state.is_stale(url, poll_interval):
                     continue
                 try:
-                    items = await fetch_feed(
-                        url, timeout=timeout, feed_name=feed.name.strip(), client=client
+                    items = await fetch_feed(url, timeout=timeout, feed_name=name, client=client)
+                    self._state.refresh_cache(
+                        url,
+                        items,
+                        max_items=max_items,
+                        max_seen_ids=self._max_seen_ids(),
                     )
-                    self._state.refresh_cache(url, items, max_items=max_items)
                 except Exception as exc:
                     self.ctx.logger.warning("刷新 RSS 失败 url=%s: %s", url, exc)
         self._state.save()
 
     def _collect_stream_items(
-        self, stream_cfg: StreamRssConfig, *, feed_name_filter: str = ""
+        self, stream_id: str, *, feed_name_filter: str = ""
     ) -> list[RssItem]:
         assert self._state is not None
         items: list[RssItem] = []
         name_filter = feed_name_filter.strip().lower()
-        for feed in stream_cfg.feeds:
-            url = feed.url.strip()
-            if not url:
-                continue
-            configured_name = feed.name.strip()
+        for url, configured_name in self._effective_feeds_for_stream(stream_id):
             if name_filter:
                 candidates = {configured_name.lower(), url.lower()}
                 if name_filter not in candidates and not any(
-                    name_filter in c for c in candidates if c
+                    name_filter in candidate for candidate in candidates if candidate
                 ):
                     continue
             items.extend(self._state.get_cached_items(url))
         return sort_items_by_published(items)
 
     async def _build_stream_feed_content(
-        self, stream_id: str, *, feed_name_filter: str = ""
+        self,
+        stream_id: str,
+        *,
+        feed_name_filter: str = "",
+        keywords: str = "",
     ) -> str | None:
-        stream_cfg = self._get_stream_config(stream_id)
-        if stream_cfg is None or not stream_cfg.feeds:
+        if not self._effective_feeds_for_stream(stream_id):
             return None
-        await self._refresh_stream_feeds(stream_cfg)
-        items = self._collect_stream_items(stream_cfg, feed_name_filter=feed_name_filter)
+        await self._refresh_stream_feeds(stream_id)
+        items = self._collect_stream_items(stream_id, feed_name_filter=feed_name_filter)
+        keyword_list = parse_keywords(keywords)
+        if keyword_list:
+            items = filter_items_by_keywords(items, keyword_list)
         if not items:
+            if keyword_list:
+                return f"没有匹配关键词「{'、'.join(keyword_list)}」的 RSS 条目。"
             return "当前没有可显示的 RSS 条目（可能尚未完成首次拉取）。"
         max_items = int(self.config.rss.max_items_per_feed)
-        truncated = len(items) > max_items
-        body = format_items(items, self.config.rss, max_items=max_items)
+        sorted_items = sort_items_by_published(items)
+        truncated = len(sorted_items) > max_items
+        body = format_items(sorted_items, self.config.rss, max_items=max_items)
         preamble = render_preamble(
             self.config.rss,
-            count=min(len(items), max_items),
+            count=min(len(sorted_items), max_items),
             feed_names=feed_name_filter or "全部订阅",
             stream_id=stream_id,
         )
         suffix = f"\n\n（仅显示最近 {max_items} 条）" if truncated else ""
         return preamble + body + suffix
 
+    def _format_feed_list_lines(self, feeds: list[tuple[str, str]]) -> str:
+        if not feeds:
+            return "无"
+        lines: list[str] = []
+        for url, name in feeds:
+            label = name or url
+            lines.append(f"- {label} / {url}")
+        return "\n".join(lines)
+
+    @Tool(
+        "add_rss_feed",
+        description="为当前聊天流添加 RSS/Atom 订阅（写入插件本地存储，不修改 config.toml）",
+        parameters=[
+            ToolParameterInfo(
+                name="url",
+                param_type=ToolParamType.STRING,
+                description="RSS/Atom 订阅地址（http/https）",
+                required=True,
+            ),
+            ToolParameterInfo(
+                name="name",
+                param_type=ToolParamType.STRING,
+                description="可选，显示名称；缺省使用 feed 标题",
+                required=False,
+            ),
+        ],
+    )
+    async def handle_add_rss_feed(self, url: str, name: str = "", **kwargs: Any) -> dict[str, Any]:
+        stream_id = str(kwargs.get("stream_id") or "").strip()
+        if not stream_id:
+            return {"content": "无法获取当前聊天流 ID，添加 RSS 失败。"}
+        if self._state is None or self._bot_feeds is None:
+            return {"content": "插件尚未完成加载，请稍后重试。"}
+
+        normalized_url = url.strip()
+        if not normalized_url:
+            return {"content": "请提供有效的 RSS 订阅 URL。"}
+
+        if self._has_effective_feed_url(stream_id, normalized_url):
+            return {"content": f"当前聊天流已订阅该 RSS：{normalized_url}"}
+
+        timeout = float(self.config.rss.request_timeout_seconds)
+        try:
+            resolved_name, items = await validate_feed_url(
+                normalized_url, timeout=timeout, feed_name=name.strip()
+            )
+        except httpx.HTTPStatusError as exc:
+            return {"content": f"无法拉取 RSS（HTTP {exc.response.status_code}）：{normalized_url}"}
+        except httpx.RequestError as exc:
+            return {"content": f"无法访问 RSS 地址：{exc}"}
+        except ValueError as exc:
+            return {"content": str(exc)}
+        except Exception as exc:
+            self.ctx.logger.warning("校验 RSS URL 失败 url=%s: %s", normalized_url, exc)
+            return {"content": f"校验 RSS 失败：{exc}"}
+
+        display_name = name.strip() or resolved_name or normalized_url
+        if not self._bot_feeds.add_feed(stream_id, normalized_url, display_name):
+            return {"content": f"当前聊天流已订阅该 RSS：{normalized_url}"}
+        self._bot_feeds.save()
+
+        max_items = int(self.config.rss.max_items_per_feed)
+        self._state.update_feed(
+            normalized_url,
+            items,
+            max_items=max_items,
+            max_seen_ids=self._max_seen_ids(),
+        )
+        self._state.save()
+
+        return {"content": f"已为当前聊天流添加 RSS：{display_name}（{normalized_url}）"}
+
     @Tool(
         "query_rss_feeds",
-        description="查询当前聊天流已配置的 RSS 订阅的完整内容（按时间排序）",
+        description="查询当前聊天流 RSS 订阅的完整内容（按时间排序，支持关键词过滤）",
         parameters=[
             ToolParameterInfo(
                 name="feed_name",
@@ -728,13 +1048,23 @@ class RssReaderPlugin(MaiBotPlugin):
                 description="可选，按订阅源名称或 URL 过滤",
                 required=False,
             ),
+            ToolParameterInfo(
+                name="keywords",
+                param_type=ToolParamType.STRING,
+                description="可选，空格或逗号分隔的关键词（任意匹配即保留）",
+                required=False,
+            ),
         ],
     )
-    async def handle_query_rss_feeds(self, feed_name: str = "", **kwargs: Any) -> dict[str, Any]:
+    async def handle_query_rss_feeds(
+        self, feed_name: str = "", keywords: str = "", **kwargs: Any
+    ) -> dict[str, Any]:
         stream_id = str(kwargs.get("stream_id") or "").strip()
-        content = await self._build_stream_feed_content(stream_id, feed_name_filter=feed_name)
+        content = await self._build_stream_feed_content(
+            stream_id, feed_name_filter=feed_name, keywords=keywords
+        )
         if content is None:
-            return {"content": "当前聊天流未配置 RSS 订阅。"}
+            return {"content": "当前聊天流没有 RSS 订阅。"}
         return {"content": content}
 
     @Command(
@@ -757,14 +1087,26 @@ class RssReaderPlugin(MaiBotPlugin):
     @Command("rss", description="查看本聊天流 RSS 订阅", pattern=r"^/rss(?:\s+.*)?$")
     async def handle_rss(self, **kwargs: Any) -> tuple[bool, str, int]:
         stream_id = str(kwargs.get("stream_id") or "").strip()
-        stream_cfg = self._get_stream_config(stream_id)
-        if stream_cfg is None or not stream_cfg.feeds:
+        if not self._effective_feeds_for_stream(stream_id):
             return False, "", 0
         content = await self._build_stream_feed_content(stream_id)
         if not content:
             return False, "", 0
         await self.ctx.send.text(content, stream_id)
         return True, "已发送 RSS 订阅内容", 2
+
+    @Command("rss_list", description="列出本聊天流的 RSS 订阅来源", pattern=r"^/rss_list$")
+    async def handle_rss_list(self, **kwargs: Any) -> tuple[bool, str, int]:
+        stream_id = str(kwargs.get("stream_id") or "").strip()
+        bot_name = str(await self.ctx.config.get("bot.nickname", "麦麦"))
+        config_section = self._format_feed_list_lines(self._feeds_from_config(stream_id))
+        bot_section = self._format_feed_list_lines(self._feeds_from_bot(stream_id))
+        message = (
+            f"【配置文件中的 RSS 订阅】\n{config_section}\n\n"
+            f"【{bot_name} 自行添加的 RSS 订阅】\n{bot_section}"
+        )
+        await self.ctx.send.text(message, stream_id)
+        return True, "已发送 RSS 订阅列表", 2
 
 
 def create_plugin() -> RssReaderPlugin:

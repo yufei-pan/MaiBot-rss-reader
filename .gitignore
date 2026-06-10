@@ -6,6 +6,8 @@ venv/
 .env
 rss_state.json
 rss_state.json.*
+rss_bot_feeds.json
+rss_bot_feeds.json.*
 .pytest_cache/
 .mypy_cache/
 .DS_Store

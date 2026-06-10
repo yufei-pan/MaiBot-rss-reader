@@ -9,6 +9,7 @@ poll_interval_seconds = 300
 request_timeout_seconds = 20
 max_concurrent_fetches = 5
 max_items_per_feed = 30
+max_seen_ids_per_feed = 500
 
 proactive_intent_template = """有 {count} 条新的 RSS 订阅内容已写入你的上下文（来源：{feed_names}）。
 你可以自行决定是否查阅详情。若你认为值得告知用户，可自行组织话术并附上摘要与原文链接；
