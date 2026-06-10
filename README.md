@@ -2,6 +2,28 @@
 
 MaiBot 第三方插件：订阅 RSS 源，将新内容注入 Maisaka 上下文并触发主动处理；提供 `query_rss_feeds` 工具与 `/rss` 命令供麦麦与用户查阅订阅。
 
+> *没错是给麦麦提供RSS阅读器不是把麦麦当作RSS阅读器*
+
+通过外部RSS来触发 ***麦麦思考*** 的方式，达成**不尴尬的**，**自然的**，**符合人设的**，**不打断上下文的**话题生成，新闻读取，追踪现实的效果。
+
+同时如果上下文足够长，你可以随时问麦麦rss推送了什么新闻，让麦麦来帮你总结你的feed内容。
+
+> [!WARNING]
+> 因为绝大多数的RSS网页链接而非文本正文，因此麦麦需要某种获取网页内容的方式来查看详情。
+
+
+> 推荐给麦麦添加网页浏览能力，比如mcp-server-fetch，或者（和）playwright。
+>
+> 麦麦联网插件（search plugin） 可以凑活着用，但是因为要过搜索引擎不一定能直接拉取到目标网页
+
+> [!NOTE]
+> 秉承着能力分离的理念，本插件暂时没有添加网页抓取能力的打算。
+
+同时，本插件也有让麦麦**检索RSS推送**和让麦麦**自行添加RSS推送**的功能。
+
+> [!NOTE]
+> 和[塑料内存条](https://github.com/yufei-pan/MaiBot-plastic-memory-plugin)一起使用可以做到如果麦麦自行判断这个新闻不应该现在马上打扰你时，把新闻记下来以后再聊的效果。
+
 ## 功能
 
 - 按可配置间隔全局拉取 RSS（客户端 pull）
@@ -103,26 +125,30 @@ enabled = true
 - **plastic-memory**：本插件不依赖便利贴插件；默认可在 `proactive_intent_template` 中提示麦麦可自行使用备忘工具
 - **未配置 stream**：`/rss` 命令静默无响应；`query_rss_feeds` 返回「没有 RSS 订阅」提示
 - **双来源订阅**：`config.toml` 中的订阅与麦麦通过 `add_rss_feed` 添加的订阅在运行时合并；后者保存在 `rss_bot_feeds.json`（已 gitignore）
-- **`rss_state.json` 体积**：`items` 缓存按 `max_items_per_feed` 有界；`seen_ids` 按 `max_seen_ids_per_feed`（默认 500）裁剪，长期运行体量可预测
+- `**rss_state.json` 体积**：`items` 缓存按 `max_items_per_feed` 有界；`seen_ids` 按 `max_seen_ids_per_feed`（默认 500）裁剪，长期运行体量可预测
 
 ### 工具与命令
 
-| 名称 | 说明 |
-| --- | --- |
-| `add_rss_feed` | 校验 URL 后为当前聊天流添加 RSS；重复 URL 返回「已订阅」 |
+
+| 名称                | 说明                                                         |
+| ----------------- | ---------------------------------------------------------- |
+| `add_rss_feed`    | 校验 URL 后为当前聊天流添加 RSS；重复 URL 返回「已订阅」                        |
 | `query_rss_feeds` | 查询当前流订阅；可选 `feed_name`、`keywords`（空格/逗号分隔，任意关键词匹配标题/摘要等字段） |
-| `/rss` | 向用户发送当前流合并后的订阅内容 |
-| `/rss_list` | 分开展示配置文件订阅与麦麦自行添加的订阅 |
-| `/rss_stream_id` | 返回当前聊天流 `stream_id` |
+| `/rss`            | 向用户发送当前流合并后的订阅内容                                           |
+| `/rss_list`       | 分开展示配置文件订阅与麦麦自行添加的订阅                                       |
+| `/rss_stream_id`  | 返回当前聊天流 `stream_id`                                        |
+
 
 ## 目录结构
 
 单文件插件，所有逻辑在 `plugin.py` 中。运行时数据：
 
-| 文件 | 用途 |
-| --- | --- |
-| `rss_state.json` | 各 feed 的缓存条目与已见 ID（gitignore） |
-| `rss_bot_feeds.json` | 麦麦通过工具添加的订阅（gitignore） |
+
+| 文件                   | 用途                            |
+| -------------------- | ----------------------------- |
+| `rss_state.json`     | 各 feed 的缓存条目与已见 ID（gitignore） |
+| `rss_bot_feeds.json` | 麦麦通过工具添加的订阅（gitignore）        |
+
 
 ## 开发与测试
 
