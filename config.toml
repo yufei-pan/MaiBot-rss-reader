@@ -1,0 +1,57 @@
+# 麦麦 RSS 阅读器插件配置
+
+[plugin]
+enabled = true
+config_version = "1.0.0"
+
+[rss]
+poll_interval_seconds = 300
+request_timeout_seconds = 20
+max_concurrent_fetches = 5
+max_items_per_feed = 30
+
+proactive_intent_template = """有 {count} 条新的 RSS 订阅内容已写入你的上下文（来源：{feed_names}）。
+你可以自行决定是否查阅详情。若你认为值得告知用户，可自行组织话术并附上摘要与原文链接；
+若与当前对话无关或时机不合适，也可以忽略；若需要日后参考，也可通过你已有的备忘工具（如便利贴）自行记录。"""
+
+context_visible_text_template = "RSS 新内容 {count} 条"
+context_preamble_template = "【RSS 订阅】\n"
+
+item_template = """### {title}
+- 来源：{feed_name}
+- 时间：{published}
+- 链接：{link}
+- 摘要：{summary}
+"""
+
+item_separator = "\n"
+
+# ---------------------------------------------------------------------------
+# 聊天流 RSS 订阅（示例结构，默认关闭；请用 /rss_stream_id 获取真实 stream_id 后替换并启用）
+#
+# stream_id 说明：
+#   - 类型：字符串，与 MaiBot 的 session_id / stream_id 相同
+#   - 格式：32 位小写十六进制 MD5（仅含 0-9、a-f），例如 "a1b2c3d4e5f6789012345678abcdef01"
+#   - 须为 Host 中已存在的聊天流；配置错误时 RSS 推送与 /rss 均不会生效
+# ---------------------------------------------------------------------------
+
+[[rss.streams]]
+stream_id = "0123456789abcdef0123456789abcdef"  # 32 位 hex，用 /rss_stream_id 获取真实值
+enabled = true
+
+  [[rss.streams.feeds]]
+  url = "https://spectrum.ieee.org/customfeeds/feed/all-topics/rss"
+  name = "IEEE Spectrum 首页"
+
+  [[rss.streams.feeds]]
+  url = "https://openai.com/news/rss.xml"
+  name = "OpenAI 新闻"
+
+# 第二个聊天流：另一个群/私聊
+[[rss.streams]]
+stream_id = "fedcba9876543210fedcba9876543210"
+enabled = true
+
+  [[rss.streams.feeds]]
+  url = "http://news.mit.edu/rss/topic/artificial-intelligence2"
+  name = "MIT 新闻 - AI"
