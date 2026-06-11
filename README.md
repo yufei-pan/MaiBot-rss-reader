@@ -11,7 +11,7 @@ MaiBot 第三方插件：订阅 RSS 源，将新内容注入 Maisaka 上下文�
 > [!WARNING]
 > 因为绝大多数的RSS是网页链接而非文本正文，因此麦麦需要某种获取网页内容的方式来查看详情。
 
-> 推荐给麦麦添加网页浏览能力，比如mcp-server-fetch，或者（和）playwright。
+> 推荐给麦麦添加网页浏览能力，比如 [maibot-fetch-url-plugin](https://github.com/yufei-pan/maibot-fetch-url-plugin)，mcp-server-fetch，或者（和）playwright。
 >
 > 麦麦联网插件（search plugin） 可以凑活着用，但是因为要过搜索引擎不一定能直接拉取到目标网页
 
