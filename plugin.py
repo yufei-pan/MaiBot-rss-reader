@@ -27,12 +27,22 @@ from maibot_sdk.types import ToolParameterInfo, ToolParamType
 # 默认模板
 # --------------------------------------------------------------------------- #
 
-DEFAULT_PROACTIVE_INTENT_TEMPLATE = """有 {count} 条新的 RSS 订阅内容已写入你的上下文（来源：{feed_names}）。
-你可以自行决定是否查阅详情。若你认为值得告知用户，可自行组织话术并附上摘要与原文链接；
-若与当前对话无关或时机不合适，也可以忽略；若需要日后参考，也可通过你已有的备忘工具（如便利贴）自行记录。"""
+DEFAULT_PROACTIVE_INTENT_TEMPLATE = """有 {count} 条新的 RSS 内容已写入你的上下文（来源：{feed_names}）。
+
+这些 RSS 是给你自己看的——不是要你就当用户的过滤器或摘要器。你可以按自己的兴趣决定要不要深入、要不要分享、要不要暂时忽略。
+
+RSS 摘要往往很短；若某条让你好奇，可以用你已有的网页抓取能力（如 mcp-server-fetch、playwright 等）打开原文链接查看详情，再决定接下来想做什么。
+
+你完全可以自主行动：现在聊聊、稍后再说、只记在心里、或通过备忘工具留存；不必为了「服务用户」而强行推送。"""
 
 DEFAULT_CONTEXT_VISIBLE_TEXT_TEMPLATE = "RSS 新内容 {count} 条"
-DEFAULT_CONTEXT_PREAMBLE_TEMPLATE = "【RSS 订阅】\n"
+DEFAULT_CONTEXT_PREAMBLE_TEMPLATE = """【RSS 订阅·给你看的】
+以下条目供你自己浏览，无需充当用户的信息筛选器。若某条感兴趣，可抓取链接原文深入了解。
+
+"""
+DEFAULT_QUERY_RSS_HINT = """
+---
+【提示】这些 RSS 是给你自己查阅的，不是让你帮用户过滤或代读。摘要可能不完整；若某条感兴趣，请用网页抓取工具打开链接查看全文，再按你想做的来（分享、备忘、忽略或仅自己消化）。"""
 DEFAULT_ITEM_TEMPLATE = """### {title}
 - 来源：{feed_name}
 - 时间：{published}
@@ -941,6 +951,7 @@ class RssReaderPlugin(MaiBotPlugin):
         *,
         feed_name_filter: str = "",
         keywords: str = "",
+        for_bot: bool = False,
     ) -> str | None:
         if not self._effective_feeds_for_stream(stream_id):
             return None
@@ -951,8 +962,10 @@ class RssReaderPlugin(MaiBotPlugin):
             items = filter_items_by_keywords(items, keyword_list)
         if not items:
             if keyword_list:
-                return f"没有匹配关键词「{'、'.join(keyword_list)}」的 RSS 条目。"
-            return "当前没有可显示的 RSS 条目（可能尚未完成首次拉取）。"
+                message = f"没有匹配关键词「{'、'.join(keyword_list)}」的 RSS 条目。"
+            else:
+                message = "当前没有可显示的 RSS 条目（可能尚未完成首次拉取）。"
+            return message + (DEFAULT_QUERY_RSS_HINT if for_bot else "")
         max_items = int(self.config.rss.max_items_per_feed)
         sorted_items = sort_items_by_published(items)
         truncated = len(sorted_items) > max_items
@@ -964,7 +977,8 @@ class RssReaderPlugin(MaiBotPlugin):
             stream_id=stream_id,
         )
         suffix = f"\n\n（仅显示最近 {max_items} 条）" if truncated else ""
-        return preamble + body + suffix
+        bot_hint = DEFAULT_QUERY_RSS_HINT if for_bot else ""
+        return preamble + body + suffix + bot_hint
 
     def _format_feed_list_lines(self, feeds: list[tuple[str, str]]) -> str:
         if not feeds:
@@ -1040,7 +1054,10 @@ class RssReaderPlugin(MaiBotPlugin):
 
     @Tool(
         "query_rss_feeds",
-        description="查询当前聊天流 RSS 订阅的完整内容（按时间排序，支持关键词过滤）",
+        description=(
+            "查阅当前聊天流的 RSS 订阅（给你自己看，可按兴趣拉取原文深入了解）。"
+            "按时间排序，支持按源名与关键词过滤。"
+        ),
         parameters=[
             ToolParameterInfo(
                 name="feed_name",
@@ -1061,7 +1078,7 @@ class RssReaderPlugin(MaiBotPlugin):
     ) -> dict[str, Any]:
         stream_id = str(kwargs.get("stream_id") or "").strip()
         content = await self._build_stream_feed_content(
-            stream_id, feed_name_filter=feed_name, keywords=keywords
+            stream_id, feed_name_filter=feed_name, keywords=keywords, for_bot=True
         )
         if content is None:
             return {"content": "当前聊天流没有 RSS 订阅。"}

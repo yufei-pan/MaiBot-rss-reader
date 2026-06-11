@@ -11,12 +11,19 @@ max_concurrent_fetches = 5
 max_items_per_feed = 30
 max_seen_ids_per_feed = 500
 
-proactive_intent_template = """有 {count} 条新的 RSS 订阅内容已写入你的上下文（来源：{feed_names}）。
-你可以自行决定是否查阅详情。若你认为值得告知用户，可自行组织话术并附上摘要与原文链接；
-若与当前对话无关或时机不合适，也可以忽略；若需要日后参考，也可通过你已有的备忘工具（如便利贴）自行记录。"""
+proactive_intent_template = """有 {count} 条新的 RSS 内容已写入你的上下文（来源：{feed_names}）。
+
+这些 RSS 是给你自己看的——不是要你就当用户的过滤器或摘要器。你可以按自己的兴趣决定要不要深入、要不要分享、要不要暂时忽略。
+
+RSS 摘要往往很短；若某条让你好奇，可以用你已有的网页抓取能力（如 fetch、playwright 等）打开原文链接查看详情，再决定接下来想做什么。
+
+你完全可以自主行动：现在聊聊、稍后再说、只记在心里、或通过备忘工具留存；不必为了「服务用户」而强行推送。"""
 
 context_visible_text_template = "RSS 新内容 {count} 条"
-context_preamble_template = "【RSS 订阅】\n"
+context_preamble_template = """【RSS 订阅】
+以下条目供你自己浏览，无需充当用户的信息筛选器。若某条感兴趣，可抓取链接原文深入了解。
+
+"""
 
 item_template = """### {title}
 - 来源：{feed_name}
@@ -34,6 +41,8 @@ item_separator = "\n"
 #   - 类型：字符串，与 MaiBot 的 session_id / stream_id 相同
 #   - 格式：32 位小写十六进制 MD5（仅含 0-9、a-f），例如 "a1b2c3d4e5f6789012345678abcdef01"
 #   - 须为 Host 中已存在的聊天流；配置错误时 RSS 推送与 /rss 均不会生效
+#
+# 提示：你也可以这里留空，用自然语言询问麦麦有什么想关注的RSS流，让麦麦自己决定自己想看什么。
 # ---------------------------------------------------------------------------
 
 [[rss.streams]]
