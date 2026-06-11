@@ -31,12 +31,12 @@ DEFAULT_PROACTIVE_INTENT_TEMPLATE = """有 {count} 条新的 RSS 内容已写入
 
 这些 RSS 是给你自己看的——不是要你就当用户的过滤器或摘要器。你可以按自己的兴趣决定要不要深入、要不要分享、要不要暂时忽略。
 
-RSS 摘要往往很短；若某条让你好奇，可以用你已有的网页抓取能力（如 mcp-server-fetch、playwright 等）打开原文链接查看详情，再决定接下来想做什么。
+RSS 摘要往往很短；若某条让你好奇，可以用你已有的网页抓取能力（如 fetch、playwright 等）打开原文链接查看详情，再决定接下来想做什么。
 
 你完全可以自主行动：现在聊聊、稍后再说、只记在心里、或通过备忘工具留存；不必为了「服务用户」而强行推送。"""
 
 DEFAULT_CONTEXT_VISIBLE_TEXT_TEMPLATE = "RSS 新内容 {count} 条"
-DEFAULT_CONTEXT_PREAMBLE_TEMPLATE = """【RSS 订阅·给你看的】
+DEFAULT_CONTEXT_PREAMBLE_TEMPLATE = """【RSS 订阅】
 以下条目供你自己浏览，无需充当用户的信息筛选器。若某条感兴趣，可抓取链接原文深入了解。
 
 """
