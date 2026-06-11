@@ -991,7 +991,7 @@ class RssReaderPlugin(MaiBotPlugin):
 
     @Tool(
         "add_rss_feed",
-        description="为当前聊天流添加 RSS/Atom 订阅（写入插件本地存储，不修改 config.toml）",
+        description="为当前聊天流添加 RSS/Atom 订阅",
         parameters=[
             ToolParameterInfo(
                 name="url",
