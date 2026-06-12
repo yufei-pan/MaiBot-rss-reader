@@ -27,7 +27,9 @@ from maibot_sdk.types import ToolParameterInfo, ToolParamType
 # 默认模板
 # --------------------------------------------------------------------------- #
 
-DEFAULT_PROACTIVE_INTENT_TEMPLATE = """有 {count} 条新的 RSS 内容已写入你的上下文（来源：{feed_names}）。
+DEFAULT_PROACTIVE_INTENT_TEMPLATE = """有 {count} 条新的 RSS 内容已写入你的内部上下文（来源：{feed_names}）。
+
+这些内容不会直接发给用户，仅供你自己阅读与决策。
 
 这些 RSS 是给你自己看的——不是要你就当用户的过滤器或摘要器。你可以按自己的兴趣决定要不要深入、要不要分享、要不要暂时忽略。
 
@@ -36,13 +38,13 @@ RSS 摘要往往很短；若某条让你好奇，可以用你已有的网页抓�
 你完全可以自主行动：现在聊聊、稍后再说、只记在心里、或通过备忘工具留存；不必为了「服务用户」而强行推送。"""
 
 DEFAULT_CONTEXT_VISIBLE_TEXT_TEMPLATE = "RSS 新内容 {count} 条"
-DEFAULT_CONTEXT_PREAMBLE_TEMPLATE = """【RSS 订阅】
-以下条目供你自己浏览，无需充当用户的信息筛选器。若某条感兴趣，可抓取链接原文深入了解。
+DEFAULT_CONTEXT_PREAMBLE_TEMPLATE = """【RSS 订阅 · 内部上下文】
+以下条目仅写入你的对话上下文，不会直接发给用户。供你自己浏览，无需充当用户的信息筛选器。若某条感兴趣，可抓取链接原文深入了解。
 
 """
 DEFAULT_QUERY_RSS_HINT = """
 ---
-【提示】这些 RSS 是给你自己查阅的，不是让你帮用户过滤或代读。摘要可能不完整；若某条感兴趣，请用网页抓取工具打开链接查看全文，再按你想做的来（分享、备忘、忽略或仅自己消化）。"""
+【提示】以下为内部上下文，不会发给用户。这些 RSS 是给你自己查阅的，不是让你帮用户过滤或代读。摘要可能不完整；若某条感兴趣，请用网页抓取工具打开链接查看全文，再按你想做的来（分享、备忘、忽略或仅自己消化）。"""
 DEFAULT_ITEM_TEMPLATE = """### {title}
 - 来源：{feed_name}
 - 时间：{published}
@@ -1055,7 +1057,7 @@ class RssReaderPlugin(MaiBotPlugin):
     @Tool(
         "query_rss_feeds",
         description=(
-            "查阅当前聊天流的 RSS 订阅（给你自己看，可按兴趣拉取原文深入了解）。"
+            "查阅当前聊天流的 RSS 订阅（内部上下文，不会发给用户；给你自己看，可按兴趣拉取原文深入了解）。"
             "按时间排序，支持按源名与关键词过滤。"
         ),
         parameters=[

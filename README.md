@@ -124,7 +124,7 @@ enabled = true
 ## 行为说明
 
 - **首次拉取**：某 feed 第一次被拉取时只建立基线（记录已见条目），不会触发 proactive，避免启动时轰炸用户
-- **新内容通知**：仅对真正的新条目注入上下文并触发 proactive；默认 intent 强调 RSS 是给麦麦自己看的，鼓励按需抓取原文、自主决定是否分享
+- **新内容通知**：仅对真正的新条目注入内部上下文并触发 proactive；默认 intent 明确说明 RSS **不会直接发给用户**，仅供麦麦自己阅读，鼓励按需抓取原文、自主决定是否分享
 - **[塑料内存条](https://github.com/yufei-pan/MaiBot-plastic-memory-plugin)**：本插件不依赖便利贴插件；可与塑料内存条配合，麦麦若判断不宜立刻打扰用户，可先记下稍后再聊
 - **未配置 stream**：`/rss` 命令静默无响应；`query_rss_feeds` 返回「没有 RSS 订阅」提示
 - **双来源订阅**：`config.toml` 中的订阅与麦麦通过 `add_rss_feed` 添加的订阅在运行时合并；后者保存在 `rss_bot_feeds.json`（已 gitignore）
@@ -136,7 +136,7 @@ enabled = true
 | 名称                | 说明                                                            |
 | ----------------- | ------------------------------------------------------------- |
 | `add_rss_feed`    | 校验 URL 后为当前聊天流添加 RSS；重复 URL 返回「已订阅」                           |
-| `query_rss_feeds` | 麦麦自行查阅当前流 RSS；返回内容含提示（鼓励抓取原文、按己意行动）；可选 `feed_name`、`keywords` |
+| `query_rss_feeds` | 麦麦自行查阅当前流 RSS（内部上下文，不会发给用户）；返回内容含提示（鼓励抓取原文、按己意行动）；可选 `feed_name`、`keywords` |
 | `/rss`            | 向用户发送当前流合并后的订阅内容                                              |
 | `/rss_list`       | 分开展示配置文件订阅与麦麦自行添加的订阅                                          |
 | `/rss_stream_id`  | 返回当前聊天流 `stream_id`                                           |
