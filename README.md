@@ -77,34 +77,23 @@ pip install 'feedparser>=6.0.0'
 
 ### `config.toml` 简单示例
 
+`[rss]` 下的数值与模板字段**留空或不写**即使用插件内置默认；仅在你需要覆盖时再填写。插件升级后若内置默认变更，留空字段会自动跟随，无需手动改配置。
+
+订阅采用**扁平结构**：`rss.streams` 声明聊天流开关，`rss.feeds` 通过 `stream_id` 关联 RSS 源（WebUI 可直接编辑）。
+
 ```toml
 [rss]
-poll_interval_seconds = 300
-max_seen_ids_per_feed = 500   # 每个 feed 已见 ID 上限，防止 rss_state.json 无限增长
+# poll_interval_seconds =          # 留空=内置默认 300
+# max_seen_ids_per_feed =            # 留空=内置默认 500
 
-# ...
-
-# 第一个聊天流：订阅两个 RSS 源
 [[rss.streams]]
-stream_id = "0123456789abcdef0123456789abcdef"  # 32 位 hex，用 /rss_stream_id 获取真实值
+stream_id = "0123456789abcdef0123456789abcdef"
 enabled = true
 
-  [[rss.streams.feeds]]
-  url = "https://spectrum.ieee.org/customfeeds/feed/all-topics/rss"
-  name = "IEEE Spectrum 首页"
-
-  [[rss.streams.feeds]]
-  url = "https://openai.com/news/rss.xml"
-  name = "OpenAI 新闻"
-
-# 第二个聊天流：另一个群/私聊
-[[rss.streams]]
-stream_id = "fedcba9876543210fedcba9876543210"
-enabled = true
-
-  [[rss.streams.feeds]]
-  url = "http://news.mit.edu/rss/topic/artificial-intelligence2"
-  name = "MIT 新闻 - AI"
+[[rss.feeds]]
+stream_id = "0123456789abcdef0123456789abcdef"
+url = "https://spectrum.ieee.org/customfeeds/feed/all-topics/rss"
+name = "IEEE Spectrum 首页"
 ```
 
 ### 可配置模板（`[rss]` 下）

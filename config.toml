@@ -1,43 +1,30 @@
 # 麦麦 RSS 阅读器插件配置
+#
+# [rss] 下的数值与模板字段留空（或不写）即使用插件代码中的内置默认；
+# 仅在你需要覆盖默认值时再填写。插件升级后修改内置默认时，留空字段会自动跟随新默认。
 
 [plugin]
 enabled = true
-config_version = "1.0.0"
+config_version = "1.2.0"
 
 [rss]
-poll_interval_seconds = 300
-request_timeout_seconds = 20
-max_concurrent_fetches = 5
-max_items_per_feed = 30
-max_seen_ids_per_feed = 500
-
-proactive_intent_template = """有 {count} 条新的 RSS 内容已写入你的内部上下文（来源：{feed_names}）。
-
-这些内容不会直接发给用户，仅供你自己阅读与决策。
-
-这些 RSS 是给你自己看的——不是要你就当用户的过滤器或摘要器。你可以按自己的兴趣决定要不要深入、要不要分享、要不要暂时忽略。
-
-RSS 摘要往往很短；若某条让你好奇，可以用你已有的网页抓取能力（如 fetch、playwright 等）打开原文链接查看详情，再决定接下来想做什么。
-
-你完全可以自主行动：现在聊聊、稍后再说、只记在心里、或通过备忘工具留存；不必为了「服务用户」而强行推送。"""
-
-context_visible_text_template = "RSS 新内容 {count} 条"
-context_preamble_template = """【RSS 订阅 · 内部上下文】
-以下条目仅写入你的对话上下文，不会直接发给用户。供你自己浏览，无需充当用户的信息筛选器。若某条感兴趣，可抓取链接原文深入了解。
-
-"""
-
-item_template = """### {title}
-- 来源：{feed_name}
-- 时间：{published}
-- 链接：{link}
-- 摘要：{summary}
-"""
-
-item_separator = "\n"
+# poll_interval_seconds =          # 留空=内置默认 300
+# request_timeout_seconds =        # 留空=内置默认 20
+# max_concurrent_fetches =         # 留空=内置默认 5
+# max_items_per_feed =             # 留空=内置默认 30
+# max_seen_ids_per_feed =          # 留空=内置默认 500
+#
+# proactive_intent_template = """..."""       # 留空=内置默认模板
+# context_visible_text_template = "..."       # 留空=内置默认模板
+# context_preamble_template = """..."""       # 留空=内置默认模板
+# item_template = """..."""                   # 留空=内置默认模板
+# item_separator = "\n"                       # 留空=内置默认换行
 
 # ---------------------------------------------------------------------------
-# 聊天流 RSS 订阅（示例结构，默认关闭；请用 /rss_stream_id 获取真实 stream_id 后替换并启用）
+# 聊天流 RSS 订阅（扁平结构，便于 WebUI 编辑）
+#
+# 1. 在 rss.streams 中声明聊天流并设置 enabled
+# 2. 在 rss.feeds 中为每个 RSS 源填写 stream_id（关联上方聊天流）、url、name
 #
 # stream_id 说明：
 #   - 类型：字符串，与 MaiBot 的 session_id / stream_id 相同
@@ -51,19 +38,21 @@ item_separator = "\n"
 stream_id = "0123456789abcdef0123456789abcdef"  # 32 位 hex，用 /rss_stream_id 获取真实值
 enabled = true
 
-  [[rss.streams.feeds]]
-  url = "https://spectrum.ieee.org/customfeeds/feed/all-topics/rss"
-  name = "IEEE Spectrum 首页"
-
-  [[rss.streams.feeds]]
-  url = "https://openai.com/news/rss.xml"
-  name = "OpenAI 新闻"
-
-# 第二个聊天流：另一个群/私聊
 [[rss.streams]]
 stream_id = "fedcba9876543210fedcba9876543210"
 enabled = true
 
-  [[rss.streams.feeds]]
-  url = "http://news.mit.edu/rss/topic/artificial-intelligence2"
-  name = "MIT 新闻 - AI"
+[[rss.feeds]]
+stream_id = "0123456789abcdef0123456789abcdef"
+url = "https://spectrum.ieee.org/customfeeds/feed/all-topics/rss"
+name = "IEEE Spectrum 首页"
+
+[[rss.feeds]]
+stream_id = "0123456789abcdef0123456789abcdef"
+url = "https://openai.com/news/rss.xml"
+name = "OpenAI 新闻"
+
+[[rss.feeds]]
+stream_id = "fedcba9876543210fedcba9876543210"
+url = "http://news.mit.edu/rss/topic/artificial-intelligence2"
+name = "MIT 新闻 - AI"

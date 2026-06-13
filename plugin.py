@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Protocol, Sequence
 from urllib.parse import urlparse
 
@@ -52,6 +53,13 @@ DEFAULT_ITEM_TEMPLATE = """### {title}
 - 摘要：{summary}
 """
 DEFAULT_ITEM_SEPARATOR = "\n"
+
+DEFAULT_POLL_INTERVAL_SECONDS = 300
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 20.0
+DEFAULT_MAX_CONCURRENT_FETCHES = 5
+DEFAULT_MAX_ITEMS_PER_FEED = 30
+DEFAULT_MAX_SEEN_IDS_PER_FEED = 500
+CURRENT_CONFIG_VERSION = "1.2.0"
 
 _TAG_RE = re.compile(r"<[^>]+>")
 
@@ -625,6 +633,169 @@ class RssState:
 
 
 # --------------------------------------------------------------------------- #
+# 配置解析（空值 = 使用代码内置默认，便于版本升级后自动跟随新默认）
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class EffectiveRssConfig:
+    """运行时生效的 RSS 配置（已解析占位空值）。"""
+
+    poll_interval_seconds: int
+    request_timeout_seconds: float
+    max_concurrent_fetches: int
+    max_items_per_feed: int
+    max_seen_ids_per_feed: int
+    proactive_intent_template: str
+    context_visible_text_template: str
+    context_preamble_template: str
+    item_template: str
+    item_separator: str
+
+
+def _effective_int(value: int | None, default: int, *, minimum: int = 1) -> int:
+    if value is None:
+        return default
+    return max(minimum, int(value))
+
+
+def _effective_float(value: float | None, default: float, *, minimum: float = 1.0) -> float:
+    if value is None:
+        return default
+    return max(minimum, float(value))
+
+
+def _effective_template(value: str | None, default: str) -> str:
+    if value is None or not str(value).strip():
+        return default
+    return str(value)
+
+
+def _effective_separator(value: str | None, default: str) -> str:
+    if value is None:
+        return default
+    return str(value)
+
+
+def resolve_effective_rss_config(rss: RssSectionConfig) -> EffectiveRssConfig:
+    return EffectiveRssConfig(
+        poll_interval_seconds=_effective_int(
+            rss.poll_interval_seconds, DEFAULT_POLL_INTERVAL_SECONDS, minimum=30
+        ),
+        request_timeout_seconds=_effective_float(
+            rss.request_timeout_seconds, DEFAULT_REQUEST_TIMEOUT_SECONDS, minimum=1.0
+        ),
+        max_concurrent_fetches=_effective_int(
+            rss.max_concurrent_fetches, DEFAULT_MAX_CONCURRENT_FETCHES, minimum=1
+        ),
+        max_items_per_feed=_effective_int(rss.max_items_per_feed, DEFAULT_MAX_ITEMS_PER_FEED, minimum=1),
+        max_seen_ids_per_feed=_effective_int(
+            rss.max_seen_ids_per_feed, DEFAULT_MAX_SEEN_IDS_PER_FEED, minimum=50
+        ),
+        proactive_intent_template=_effective_template(
+            rss.proactive_intent_template, DEFAULT_PROACTIVE_INTENT_TEMPLATE
+        ),
+        context_visible_text_template=_effective_template(
+            rss.context_visible_text_template, DEFAULT_CONTEXT_VISIBLE_TEXT_TEMPLATE
+        ),
+        context_preamble_template=_effective_template(
+            rss.context_preamble_template, DEFAULT_CONTEXT_PREAMBLE_TEMPLATE
+        ),
+        item_template=_effective_template(rss.item_template, DEFAULT_ITEM_TEMPLATE),
+        item_separator=_effective_separator(rss.item_separator, DEFAULT_ITEM_SEPARATOR),
+    )
+
+
+_LEGACY_BAKED_RSS_DEFAULTS: dict[str, int | float | str] = {
+    "poll_interval_seconds": DEFAULT_POLL_INTERVAL_SECONDS,
+    "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    "max_concurrent_fetches": DEFAULT_MAX_CONCURRENT_FETCHES,
+    "max_items_per_feed": DEFAULT_MAX_ITEMS_PER_FEED,
+    "max_seen_ids_per_feed": DEFAULT_MAX_SEEN_IDS_PER_FEED,
+    "proactive_intent_template": DEFAULT_PROACTIVE_INTENT_TEMPLATE,
+    "context_visible_text_template": DEFAULT_CONTEXT_VISIBLE_TEXT_TEMPLATE,
+    "context_preamble_template": DEFAULT_CONTEXT_PREAMBLE_TEMPLATE,
+    "item_template": DEFAULT_ITEM_TEMPLATE,
+    "item_separator": DEFAULT_ITEM_SEPARATOR,
+}
+
+
+def _migrate_legacy_baked_defaults(config: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """将旧版 config.toml 中写死的默认值还原为占位空值，以便跟随代码内置默认。"""
+    rss = config.get("rss")
+    if not isinstance(rss, dict):
+        return config, False
+
+    changed = False
+    for key, legacy_value in _LEGACY_BAKED_RSS_DEFAULTS.items():
+        if key not in rss:
+            continue
+        current = rss[key]
+        if isinstance(legacy_value, str):
+            if str(current) != legacy_value:
+                continue
+            rss[key] = "" if key != "item_separator" else None
+        elif current == legacy_value:
+            rss[key] = None
+        else:
+            continue
+        changed = True
+
+    plugin_section = config.get("plugin")
+    if isinstance(plugin_section, dict):
+        plugin_section["config_version"] = CURRENT_CONFIG_VERSION
+
+    return config, changed
+
+
+def _migrate_nested_stream_feeds(config: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """将旧版 [[rss.streams]] + [[rss.streams.feeds]] 嵌套结构迁移为扁平 streams + feeds。"""
+    rss = config.get("rss")
+    if not isinstance(rss, dict):
+        return config, False
+
+    streams = rss.get("streams")
+    if not isinstance(streams, list) or not streams:
+        return config, False
+    if not any(isinstance(stream, dict) and isinstance(stream.get("feeds"), list) for stream in streams):
+        return config, False
+
+    flat_streams: list[dict[str, Any]] = []
+    flat_feeds: list[dict[str, str]] = []
+    for stream in streams:
+        if not isinstance(stream, dict):
+            continue
+        stream_id = str(stream.get("stream_id", "") or "").strip()
+        if stream_id:
+            flat_streams.append(
+                {
+                    "stream_id": stream_id,
+                    "enabled": bool(stream.get("enabled", True)),
+                }
+            )
+        nested_feeds = stream.get("feeds")
+        if not isinstance(nested_feeds, list):
+            continue
+        for feed in nested_feeds:
+            if not isinstance(feed, dict):
+                continue
+            url = str(feed.get("url", "") or "").strip()
+            if not stream_id or not url:
+                continue
+            flat_feeds.append(
+                {
+                    "stream_id": stream_id,
+                    "url": url,
+                    "name": str(feed.get("name", "") or "").strip(),
+                }
+            )
+
+    rss["streams"] = flat_streams
+    rss["feeds"] = flat_feeds
+    return config, True
+
+
+# --------------------------------------------------------------------------- #
 # 配置模型
 # --------------------------------------------------------------------------- #
 
@@ -635,21 +806,50 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="1.0.0", description="配置版本")
+    config_version: str = Field(default=CURRENT_CONFIG_VERSION, description="配置版本")
 
 
 class RssFeedConfig(PluginConfigBase):
-    url: str = Field(default="", description="RSS 订阅地址")
-    name: str = Field(default="", description="订阅源显示名称（可选）")
+    stream_id: str = Field(
+        default="",
+        description="所属聊天流 ID（与 rss.streams 中 stream_id 对应；可用 /rss_stream_id 获取）",
+        json_schema_extra={
+            "label": "聊天流 ID",
+            "placeholder": "0123456789abcdef0123456789abcdef",
+        },
+    )
+    url: str = Field(
+        default="",
+        description="RSS 订阅地址",
+        json_schema_extra={
+            "label": "RSS URL",
+            "placeholder": "https://example.com/feed.xml",
+        },
+    )
+    name: str = Field(
+        default="",
+        description="订阅源显示名称（可选）",
+        json_schema_extra={
+            "label": "显示名称",
+            "placeholder": "Example News",
+        },
+    )
 
 
 class StreamRssConfig(PluginConfigBase):
     stream_id: str = Field(
         default="",
         description="聊天流 ID（32 位小写十六进制 MD5，与 session_id 相同；可在目标聊天中发送 /rss_stream_id 获取）",
+        json_schema_extra={
+            "label": "聊天流 ID",
+            "placeholder": "0123456789abcdef0123456789abcdef",
+        },
     )
-    enabled: bool = Field(default=True, description="是否为此聊天流启用 RSS")
-    feeds: list[RssFeedConfig] = Field(default_factory=list, description="RSS 源列表")
+    enabled: bool = Field(
+        default=True,
+        description="是否为此聊天流启用 RSS",
+        json_schema_extra={"label": "启用"},
+    )
 
 
 class RssSectionConfig(PluginConfigBase):
@@ -657,33 +857,71 @@ class RssSectionConfig(PluginConfigBase):
     __ui_icon__ = "rss"
     __ui_order__ = 1
 
-    poll_interval_seconds: int = Field(default=300, ge=30, description="RSS 全局拉取间隔（秒）")
-    request_timeout_seconds: float = Field(default=20.0, ge=1.0, description="HTTP 请求超时（秒）")
-    max_concurrent_fetches: int = Field(default=5, ge=1, description="并行拉取上限")
-    max_items_per_feed: int = Field(default=30, ge=1, description="每个 feed 缓存/返回的最大条目数")
-    max_seen_ids_per_feed: int = Field(
-        default=500,
+    poll_interval_seconds: int | None = Field(
+        default=None,
+        ge=30,
+        description="RSS 全局拉取间隔（秒）；留空使用插件内置默认",
+        json_schema_extra={"placeholder": str(DEFAULT_POLL_INTERVAL_SECONDS)},
+    )
+    request_timeout_seconds: float | None = Field(
+        default=None,
+        ge=1.0,
+        description="HTTP 请求超时（秒）；留空使用插件内置默认",
+        json_schema_extra={"placeholder": str(int(DEFAULT_REQUEST_TIMEOUT_SECONDS))},
+    )
+    max_concurrent_fetches: int | None = Field(
+        default=None,
+        ge=1,
+        description="并行拉取上限；留空使用插件内置默认",
+        json_schema_extra={"placeholder": str(DEFAULT_MAX_CONCURRENT_FETCHES)},
+    )
+    max_items_per_feed: int | None = Field(
+        default=None,
+        ge=1,
+        description="每个 feed 缓存/返回的最大条目数；留空使用插件内置默认",
+        json_schema_extra={"placeholder": str(DEFAULT_MAX_ITEMS_PER_FEED)},
+    )
+    max_seen_ids_per_feed: int | None = Field(
+        default=None,
         ge=50,
-        description="每个 feed 保留的已见条目 ID 上限（防止 rss_state.json 无限增长）",
+        description="每个 feed 保留的已见条目 ID 上限；留空使用插件内置默认",
+        json_schema_extra={"placeholder": str(DEFAULT_MAX_SEEN_IDS_PER_FEED)},
     )
     proactive_intent_template: str = Field(
-        default=DEFAULT_PROACTIVE_INTENT_TEMPLATE,
-        description="proactive.trigger 的 intent 模板",
+        default="",
+        description="proactive.trigger 的 intent 模板；留空使用插件内置默认",
+        json_schema_extra={"placeholder": DEFAULT_PROACTIVE_INTENT_TEMPLATE},
     )
     context_visible_text_template: str = Field(
-        default=DEFAULT_CONTEXT_VISIBLE_TEXT_TEMPLATE,
-        description="context.append 的 visible_text 模板",
+        default="",
+        description="context.append 的 visible_text 模板；留空使用插件内置默认",
+        json_schema_extra={"placeholder": DEFAULT_CONTEXT_VISIBLE_TEXT_TEMPLATE},
     )
     context_preamble_template: str = Field(
-        default=DEFAULT_CONTEXT_PREAMBLE_TEMPLATE,
-        description="注入上下文的引导语（条目列表前）",
+        default="",
+        description="注入上下文的引导语（条目列表前）；留空使用插件内置默认",
+        json_schema_extra={"placeholder": DEFAULT_CONTEXT_PREAMBLE_TEMPLATE},
     )
     item_template: str = Field(
-        default=DEFAULT_ITEM_TEMPLATE,
-        description="单条 RSS 条目的 Markdown 格式",
+        default="",
+        description="单条 RSS 条目的 Markdown 格式；留空使用插件内置默认",
+        json_schema_extra={"placeholder": DEFAULT_ITEM_TEMPLATE},
     )
-    item_separator: str = Field(default=DEFAULT_ITEM_SEPARATOR, description="多条目之间的分隔符")
-    streams: list[StreamRssConfig] = Field(default_factory=list, description="按聊天流配置的 RSS 订阅")
+    item_separator: str | None = Field(
+        default=None,
+        description="多条目之间的分隔符；留空使用插件内置默认（换行）",
+        json_schema_extra={"placeholder": DEFAULT_ITEM_SEPARATOR},
+    )
+    streams: list[StreamRssConfig] = Field(
+        default_factory=list,
+        description="按聊天流启用 RSS（stream_id + enabled）",
+        json_schema_extra={"label": "聊天流"},
+    )
+    feeds: list[RssFeedConfig] = Field(
+        default_factory=list,
+        description="RSS 源列表（通过 stream_id 关联到上方聊天流）",
+        json_schema_extra={"label": "RSS 源"},
+    )
 
 
 class RssReaderPluginConfig(PluginConfigBase):
@@ -708,10 +946,21 @@ class RssReaderPlugin(MaiBotPlugin):
         self._poll_stop = asyncio.Event()
         self._fetch_semaphore: asyncio.Semaphore | None = None
 
+    def _rss(self) -> EffectiveRssConfig:
+        return resolve_effective_rss_config(self.config.rss)
+
+    def normalize_plugin_config(
+        self, config_data: Mapping[str, Any] | None
+    ) -> tuple[dict[str, Any], bool]:
+        normalized, changed = super().normalize_plugin_config(config_data)
+        migrated, migrated_changed = _migrate_legacy_baked_defaults(normalized)
+        flattened, flattened_changed = _migrate_nested_stream_feeds(migrated)
+        return flattened, changed or migrated_changed or flattened_changed
+
     async def on_load(self) -> None:
         self._state = RssState(self._plugin_dir / "rss_state.json")
         self._bot_feeds = BotFeedsStore(self._plugin_dir / "rss_bot_feeds.json")
-        self._fetch_semaphore = asyncio.Semaphore(max(1, self.config.rss.max_concurrent_fetches))
+        self._fetch_semaphore = asyncio.Semaphore(max(1, self._rss().max_concurrent_fetches))
         self._restart_poll_loop()
         self.ctx.logger.info("麦麦 RSS 阅读器插件已加载")
 
@@ -722,7 +971,7 @@ class RssReaderPlugin(MaiBotPlugin):
     async def on_config_update(self, scope: str, config_data: dict[str, object], version: str) -> None:
         del config_data, version
         if scope == CONFIG_RELOAD_SCOPE_SELF:
-            self._fetch_semaphore = asyncio.Semaphore(max(1, self.config.rss.max_concurrent_fetches))
+            self._fetch_semaphore = asyncio.Semaphore(max(1, self._rss().max_concurrent_fetches))
             self._restart_poll_loop()
             self.ctx.logger.info("麦麦 RSS 阅读器配置已更新")
 
@@ -730,21 +979,19 @@ class RssReaderPlugin(MaiBotPlugin):
         return bool(self.config.plugin.enabled)
 
     def _max_seen_ids(self) -> int:
-        return max(50, int(self.config.rss.max_seen_ids_per_feed))
+        return max(50, self._rss().max_seen_ids_per_feed)
 
     def _feeds_from_config(self, stream_id: str) -> list[tuple[str, str]]:
         normalized = (stream_id or "").strip()
         if not normalized:
             return []
-        for stream in self.config.rss.streams:
-            if stream.stream_id.strip() != normalized:
-                continue
-            return [
-                (feed.url.strip(), feed.name.strip())
-                for feed in stream.feeds
-                if feed.url.strip()
-            ]
-        return []
+        if not any(stream.stream_id.strip() == normalized for stream in self.config.rss.streams):
+            return []
+        return [
+            (feed.url.strip(), feed.name.strip())
+            for feed in self.config.rss.feeds
+            if feed.stream_id.strip() == normalized and feed.url.strip()
+        ]
 
     def _feeds_from_bot(self, stream_id: str) -> list[tuple[str, str]]:
         if self._bot_feeds is None:
@@ -757,12 +1004,17 @@ class RssReaderPlugin(MaiBotPlugin):
         if not normalized:
             return []
         merged: dict[str, str] = {}
-        for stream in self.config.rss.streams:
-            if stream.stream_id.strip() == normalized and stream.enabled:
-                for feed in stream.feeds:
-                    url = feed.url.strip()
-                    if url:
-                        merged[url] = feed.name.strip()
+        stream_enabled = any(
+            stream.stream_id.strip() == normalized and stream.enabled
+            for stream in self.config.rss.streams
+        )
+        if stream_enabled:
+            for feed in self.config.rss.feeds:
+                if feed.stream_id.strip() != normalized:
+                    continue
+                url = feed.url.strip()
+                if url:
+                    merged[url] = feed.name.strip()
         for url, name in self._feeds_from_bot(normalized):
             if url not in merged:
                 merged[url] = name
@@ -811,7 +1063,7 @@ class RssReaderPlugin(MaiBotPlugin):
                 raise
             except Exception as exc:
                 self.ctx.logger.error("RSS 轮询异常: %s", exc, exc_info=True)
-            interval = max(30, int(self.config.rss.poll_interval_seconds))
+            interval = max(30, self._rss().poll_interval_seconds)
             try:
                 await asyncio.wait_for(self._poll_stop.wait(), timeout=interval)
                 break
@@ -825,8 +1077,9 @@ class RssReaderPlugin(MaiBotPlugin):
         if not feed_index:
             return
 
-        timeout = float(self.config.rss.request_timeout_seconds)
-        max_items = int(self.config.rss.max_items_per_feed)
+        rss_cfg = self._rss()
+        timeout = rss_cfg.request_timeout_seconds
+        max_items = rss_cfg.max_items_per_feed
         new_by_stream: dict[str, list[RssItem]] = {}
 
         async with httpx.AsyncClient(follow_redirects=True) as client:
@@ -881,7 +1134,7 @@ class RssReaderPlugin(MaiBotPlugin):
     async def _notify_stream(self, stream_id: str, new_items: list[RssItem]) -> None:
         if not new_items:
             return
-        rss_cfg = self.config.rss
+        rss_cfg = self._rss()
         feed_names = ", ".join(sorted({item.feed_name or item.feed_url for item in new_items}))
         count = len(new_items)
 
@@ -911,9 +1164,10 @@ class RssReaderPlugin(MaiBotPlugin):
     async def _refresh_stream_feeds(self, stream_id: str) -> None:
         if self._state is None:
             return
-        timeout = float(self.config.rss.request_timeout_seconds)
-        max_items = int(self.config.rss.max_items_per_feed)
-        poll_interval = int(self.config.rss.poll_interval_seconds)
+        rss_cfg = self._rss()
+        timeout = rss_cfg.request_timeout_seconds
+        max_items = rss_cfg.max_items_per_feed
+        poll_interval = rss_cfg.poll_interval_seconds
 
         async with httpx.AsyncClient(follow_redirects=True) as client:
             for url, name in self._effective_feeds_for_stream(stream_id):
@@ -968,12 +1222,13 @@ class RssReaderPlugin(MaiBotPlugin):
             else:
                 message = "当前没有可显示的 RSS 条目（可能尚未完成首次拉取）。"
             return message + (DEFAULT_QUERY_RSS_HINT if for_bot else "")
-        max_items = int(self.config.rss.max_items_per_feed)
+        rss_cfg = self._rss()
+        max_items = rss_cfg.max_items_per_feed
         sorted_items = sort_items_by_published(items)
         truncated = len(sorted_items) > max_items
-        body = format_items(sorted_items, self.config.rss, max_items=max_items)
+        body = format_items(sorted_items, rss_cfg, max_items=max_items)
         preamble = render_preamble(
-            self.config.rss,
+            rss_cfg,
             count=min(len(sorted_items), max_items),
             feed_names=feed_name_filter or "全部订阅",
             stream_id=stream_id,
@@ -1023,7 +1278,8 @@ class RssReaderPlugin(MaiBotPlugin):
         if self._has_effective_feed_url(stream_id, normalized_url):
             return {"content": f"当前聊天流已订阅该 RSS：{normalized_url}"}
 
-        timeout = float(self.config.rss.request_timeout_seconds)
+        rss_cfg = self._rss()
+        timeout = rss_cfg.request_timeout_seconds
         try:
             resolved_name, items = await validate_feed_url(
                 normalized_url, timeout=timeout, feed_name=name.strip()
@@ -1043,7 +1299,7 @@ class RssReaderPlugin(MaiBotPlugin):
             return {"content": f"当前聊天流已订阅该 RSS：{normalized_url}"}
         self._bot_feeds.save()
 
-        max_items = int(self.config.rss.max_items_per_feed)
+        max_items = rss_cfg.max_items_per_feed
         self._state.update_feed(
             normalized_url,
             items,
@@ -1098,7 +1354,7 @@ class RssReaderPlugin(MaiBotPlugin):
         message = (
             f"当前聊天流 stream_id：\n{stream_id}\n\n"
             "说明：这是 32 位小写十六进制字符串（MD5），与 session_id 相同。"
-            "请将其填入 config.toml 的 [[rss.streams]] 对应项，并将 enabled 设为 true。"
+            "请将其填入 config.toml 的 rss.streams / rss.feeds，并在 streams 中将 enabled 设为 true。"
         )
         await self.ctx.send.text(message, stream_id)
         return True, "已发送 stream_id", 2
