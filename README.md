@@ -110,6 +110,21 @@ name = "IEEE Spectrum 首页"
 
 模板使用 `str.replace` 渲染，占位符格式为 `{key}`。
 
+### 出站安全（SSRF 防护）
+
+插件会定时拉取 RSS 并将内容写入 Maisaka 内部上下文。默认启用出站 URL 安全策略：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `allow_private_networks` | `false` | 是否允许抓取内网 / 环回 / 链路本地 / 云 metadata 等保留地址 |
+| `allow_http` | `false` | 是否允许 `http://` 订阅（默认仅 `https://`） |
+
+- 添加订阅（`add_rss_feed`）、定时轮询、`/rss` 刷新均受同一策略约束
+- 每次 HTTP 请求（含重定向各跳）都会重复校验目标地址
+- 确有需要访问内网 RSS 或 http 源时，请在配置中**显式**开启对应开关
+
+若 `rss_bot_feeds.json` 中已有被拦截的恶意 URL，轮询会失败并在日志中 warning；可手动编辑该文件删除。
+
 ## 行为说明
 
 - **首次拉取**：某 feed 第一次被拉取时只建立基线（记录已见条目），不会触发 proactive，避免启动时轰炸用户

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "com.0-hz.rss-reader",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "name": "麦麦 RSS 阅读器",
   "description": "订阅 RSS 源，将新内容注入 Maisaka 上下文并触发主动处理；提供 Tool 与 /rss 命令供麦麦与用户查阅订阅。",
   "author": {

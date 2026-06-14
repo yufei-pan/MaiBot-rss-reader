@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -59,9 +60,114 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 20.0
 DEFAULT_MAX_CONCURRENT_FETCHES = 5
 DEFAULT_MAX_ITEMS_PER_FEED = 30
 DEFAULT_MAX_SEEN_IDS_PER_FEED = 500
-CURRENT_CONFIG_VERSION = "1.2.0"
+CURRENT_CONFIG_VERSION = "1.3.0"
 
 _TAG_RE = re.compile(r"<[^>]+>")
+
+
+# --------------------------------------------------------------------------- #
+# 出站 URL 安全（SSRF 防护）
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class FeedFetchPolicy:
+    allow_private_networks: bool = False
+    allow_http: bool = False
+
+
+def _is_private_address(address: str) -> bool:
+    """判断 IP 字符串是否属于内网 / 环回 / 链路本地 / 保留地址。"""
+    try:
+        ip_obj = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return bool(
+        ip_obj.is_private
+        or ip_obj.is_loopback
+        or ip_obj.is_link_local
+        or ip_obj.is_reserved
+        or ip_obj.is_multicast
+        or ip_obj.is_unspecified
+    )
+
+
+def _assert_scheme_allowed(scheme: str, *, allow_http: bool) -> None:
+    normalized = scheme.lower()
+    if normalized == "https":
+        return
+    if normalized == "http" and allow_http:
+        return
+    if normalized == "http":
+        raise ValueError("仅允许 https 订阅地址（可在配置 rss.allow_http 中放行 http）")
+    raise ValueError("URL 必须是有效的 http/https 地址")
+
+
+async def _assert_host_allowed(host: str, *, allow_private_networks: bool) -> None:
+    """校验目标主机不属于内网 / 保留地址（除非配置放行）。"""
+    if allow_private_networks:
+        return
+    if not host:
+        raise ValueError("无法解析目标主机名")
+    stripped_host = host.strip("[]")
+    try:
+        ipaddress.ip_address(stripped_host)
+        addresses = [stripped_host]
+    except ValueError:
+        try:
+            infos = await asyncio.get_running_loop().getaddrinfo(stripped_host, None)
+        except OSError as exc:
+            raise ValueError(f"域名解析失败：{stripped_host}（{exc}）") from exc
+        addresses = [str(info[4][0]) for info in infos]
+    for address in addresses:
+        if _is_private_address(address):
+            raise ValueError(
+                f"目标地址 {stripped_host} 解析到内网/保留地址，已被安全策略拦截"
+                "（可在配置 rss.allow_private_networks 中放行）"
+            )
+
+
+async def validate_outbound_feed_url(url: str, *, policy: FeedFetchPolicy) -> str:
+    """请求前预检 RSS 订阅 URL（scheme、认证信息、主机解析）。"""
+    normalized = url.strip()
+    if not normalized:
+        raise ValueError("URL 不能为空")
+    parsed = urlparse(normalized)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError("URL 必须是有效的 http/https 地址")
+
+    _assert_scheme_allowed(parsed.scheme, allow_http=policy.allow_http)
+
+    if parsed.username or parsed.password:
+        raise ValueError("URL 不允许内嵌认证信息")
+
+    hostname = (parsed.hostname or "").strip()
+    if not hostname:
+        raise ValueError("URL 缺少有效的主机名")
+
+    if not policy.allow_private_networks:
+        if hostname.lower() in {"localhost", "localhost.localdomain"}:
+            raise ValueError("不允许访问本地主机")
+        await _assert_host_allowed(hostname, allow_private_networks=False)
+
+    return normalized
+
+
+def build_feed_http_client(*, policy: FeedFetchPolicy, timeout: float) -> httpx.AsyncClient:
+    """构建带 SSRF 防护钩子的 HTTP 客户端（含重定向各跳校验）。"""
+
+    async def ssrf_request_hook(request: httpx.Request) -> None:
+        _assert_scheme_allowed(str(request.url.scheme or ""), allow_http=policy.allow_http)
+        await _assert_host_allowed(
+            str(request.url.host or ""),
+            allow_private_networks=policy.allow_private_networks,
+        )
+
+    return httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=timeout,
+        event_hooks={"request": [ssrf_request_hook]},
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -182,16 +288,15 @@ async def validate_feed_url(
     timeout: float = 20.0,
     feed_name: str = "",
     client: httpx.AsyncClient | None = None,
+    policy: FeedFetchPolicy | None = None,
 ) -> tuple[str, list[RssItem]]:
     """拉取并校验 RSS URL，返回 (feed 标题, 条目列表)。"""
-    normalized = url.strip()
-    parsed_url = urlparse(normalized)
-    if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
-        raise ValueError("URL 必须是有效的 http/https 地址")
+    fetch_policy = policy or FeedFetchPolicy()
+    normalized = await validate_outbound_feed_url(url, policy=fetch_policy)
 
     owns_client = client is None
     if client is None:
-        client = httpx.AsyncClient(follow_redirects=True)
+        client = build_feed_http_client(policy=fetch_policy, timeout=timeout)
     try:
         response = await client.get(normalized, timeout=timeout)
         response.raise_for_status()
@@ -210,14 +315,18 @@ async def fetch_feed(
     timeout: float = 20.0,
     feed_name: str = "",
     client: httpx.AsyncClient | None = None,
+    policy: FeedFetchPolicy | None = None,
 ) -> list[RssItem]:
     normalized_url = url.strip()
     if not normalized_url:
         return []
 
+    fetch_policy = policy or FeedFetchPolicy()
+    normalized_url = await validate_outbound_feed_url(normalized_url, policy=fetch_policy)
+
     owns_client = client is None
     if client is None:
-        client = httpx.AsyncClient(follow_redirects=True)
+        client = build_feed_http_client(policy=fetch_policy, timeout=timeout)
 
     try:
         response = await client.get(normalized_url, timeout=timeout)
@@ -651,6 +760,8 @@ class EffectiveRssConfig:
     context_preamble_template: str
     item_template: str
     item_separator: str
+    allow_private_networks: bool
+    allow_http: bool
 
 
 def _effective_int(value: int | None, default: int, *, minimum: int = 1) -> int:
@@ -675,6 +786,12 @@ def _effective_separator(value: str | None, default: str) -> str:
     if value is None:
         return default
     return str(value)
+
+
+def _effective_bool(value: bool | None, default: bool) -> bool:
+    if value is None:
+        return default
+    return bool(value)
 
 
 def resolve_effective_rss_config(rss: RssSectionConfig) -> EffectiveRssConfig:
@@ -703,6 +820,8 @@ def resolve_effective_rss_config(rss: RssSectionConfig) -> EffectiveRssConfig:
         ),
         item_template=_effective_template(rss.item_template, DEFAULT_ITEM_TEMPLATE),
         item_separator=_effective_separator(rss.item_separator, DEFAULT_ITEM_SEPARATOR),
+        allow_private_networks=_effective_bool(rss.allow_private_networks, False),
+        allow_http=_effective_bool(rss.allow_http, False),
     )
 
 
@@ -912,6 +1031,14 @@ class RssSectionConfig(PluginConfigBase):
         description="多条目之间的分隔符；留空使用插件内置默认（换行）",
         json_schema_extra={"placeholder": DEFAULT_ITEM_SEPARATOR},
     )
+    allow_private_networks: bool | None = Field(
+        default=None,
+        description="是否允许抓取内网 / 环回 / 保留地址。默认关闭（SSRF 防护），仅在确有需要时开启",
+    )
+    allow_http: bool | None = Field(
+        default=None,
+        description="是否允许 http:// 订阅地址。默认关闭，仅允许 https",
+    )
     streams: list[StreamRssConfig] = Field(
         default_factory=list,
         description="按聊天流启用 RSS（stream_id + enabled）",
@@ -948,6 +1075,13 @@ class RssReaderPlugin(MaiBotPlugin):
 
     def _rss(self) -> EffectiveRssConfig:
         return resolve_effective_rss_config(self.config.rss)
+
+    def _feed_fetch_policy(self) -> FeedFetchPolicy:
+        cfg = self._rss()
+        return FeedFetchPolicy(
+            allow_private_networks=cfg.allow_private_networks,
+            allow_http=cfg.allow_http,
+        )
 
     def normalize_plugin_config(
         self, config_data: Mapping[str, Any] | None
@@ -1081,10 +1215,13 @@ class RssReaderPlugin(MaiBotPlugin):
         timeout = rss_cfg.request_timeout_seconds
         max_items = rss_cfg.max_items_per_feed
         new_by_stream: dict[str, list[RssItem]] = {}
+        policy = self._feed_fetch_policy()
 
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        async with build_feed_http_client(policy=policy, timeout=timeout) as client:
             tasks = [
-                self._fetch_and_diff(url, bindings, client, timeout=timeout, max_items=max_items)
+                self._fetch_and_diff(
+                    url, bindings, client, timeout=timeout, max_items=max_items, policy=policy
+                )
                 for url, bindings in feed_index.items()
             ]
             for result in await asyncio.gather(*tasks, return_exceptions=True):
@@ -1112,6 +1249,7 @@ class RssReaderPlugin(MaiBotPlugin):
         *,
         timeout: float,
         max_items: int,
+        policy: FeedFetchPolicy,
     ) -> dict[str, list[RssItem]]:
         assert self._state is not None
         feed_name = next((name for _, name in bindings if name), "")
@@ -1119,7 +1257,9 @@ class RssReaderPlugin(MaiBotPlugin):
 
         async with semaphore:
             try:
-                items = await fetch_feed(url, timeout=timeout, feed_name=feed_name, client=client)
+                items = await fetch_feed(
+                    url, timeout=timeout, feed_name=feed_name, client=client, policy=policy
+                )
             except Exception as exc:
                 self.ctx.logger.warning("拉取 RSS 失败 url=%s: %s", url, exc)
                 return {}
@@ -1168,13 +1308,16 @@ class RssReaderPlugin(MaiBotPlugin):
         timeout = rss_cfg.request_timeout_seconds
         max_items = rss_cfg.max_items_per_feed
         poll_interval = rss_cfg.poll_interval_seconds
+        policy = self._feed_fetch_policy()
 
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        async with build_feed_http_client(policy=policy, timeout=timeout) as client:
             for url, name in self._effective_feeds_for_stream(stream_id):
                 if not self._state.is_stale(url, poll_interval):
                     continue
                 try:
-                    items = await fetch_feed(url, timeout=timeout, feed_name=name, client=client)
+                    items = await fetch_feed(
+                        url, timeout=timeout, feed_name=name, client=client, policy=policy
+                    )
                     self._state.refresh_cache(
                         url,
                         items,
@@ -1253,7 +1396,7 @@ class RssReaderPlugin(MaiBotPlugin):
             ToolParameterInfo(
                 name="url",
                 param_type=ToolParamType.STRING,
-                description="RSS/Atom 订阅地址（http/https）",
+                description="RSS/Atom 订阅地址（https）",
                 required=True,
             ),
             ToolParameterInfo(
@@ -1280,9 +1423,10 @@ class RssReaderPlugin(MaiBotPlugin):
 
         rss_cfg = self._rss()
         timeout = rss_cfg.request_timeout_seconds
+        policy = self._feed_fetch_policy()
         try:
             resolved_name, items = await validate_feed_url(
-                normalized_url, timeout=timeout, feed_name=name.strip()
+                normalized_url, timeout=timeout, feed_name=name.strip(), policy=policy
             )
         except httpx.HTTPStatusError as exc:
             return {"content": f"无法拉取 RSS（HTTP {exc.response.status_code}）：{normalized_url}"}

@@ -18,6 +18,8 @@ def test_resolve_effective_rss_config_uses_builtin_defaults_when_empty():
 
     assert effective.poll_interval_seconds == DEFAULT_POLL_INTERVAL_SECONDS
     assert effective.proactive_intent_template == DEFAULT_PROACTIVE_INTENT_TEMPLATE
+    assert effective.allow_private_networks is False
+    assert effective.allow_http is False
 
 
 def test_resolve_effective_rss_config_respects_user_override():
