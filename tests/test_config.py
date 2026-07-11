@@ -118,3 +118,24 @@ def test_normalize_plugin_config_omits_none_for_toml_persist():
     _assert_no_none(migrated_normalized)
     assert "poll_interval_seconds" not in migrated_normalized["rss"]
     assert migrated_normalized["rss"]["proactive_intent_template"] == ""
+
+
+
+def test_webui_blank_optional_scalars_normalize():
+    """WebUI 清空 Optional 数值字段会提交空字符串，应视为留空跟随内置默认。"""
+    plugin = create_plugin()
+    normalized, _ = plugin.normalize_plugin_config(
+        {
+            "plugin": {"enabled": True, "config_version": CURRENT_CONFIG_VERSION},
+            "rss": {
+                "poll_interval_seconds": "",
+                "request_timeout_seconds": "  ",
+                "allow_http": "",
+                "streams": [],
+                "feeds": [],
+            },
+        }
+    )
+    _assert_no_none(normalized)
+    assert "poll_interval_seconds" not in normalized["rss"]
+    assert "allow_http" not in normalized["rss"]
