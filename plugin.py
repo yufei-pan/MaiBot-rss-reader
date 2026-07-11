@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 import httpx
 
 from maibot_sdk import Command, CONFIG_RELOAD_SCOPE_SELF, Field, MaiBotPlugin, PluginConfigBase, Tool
+from maibot_sdk.config import validate_plugin_config
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 # --------------------------------------------------------------------------- #
@@ -914,6 +915,30 @@ def _migrate_nested_stream_feeds(config: dict[str, Any]) -> tuple[dict[str, Any]
     return config, True
 
 
+def _strip_none_deep(value: Any) -> Any:
+    """递归移除 ``None``，避免 Runner/WebUI 用 tomlkit 落盘时 ConvertError。"""
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, nested in value.items():
+            if nested is None:
+                continue
+            stripped = _strip_none_deep(nested)
+            if stripped is None:
+                continue
+            cleaned[key] = stripped
+        return cleaned
+    if isinstance(value, list):
+        return [_strip_none_deep(item) for item in value if item is not None]
+    return value
+
+
+def _dump_config_for_persist(config: Mapping[str, Any]) -> dict[str, Any]:
+    """生成可写回 config.toml 的配置（tomlkit 不支持 ``None``）。"""
+    validated = validate_plugin_config(RssReaderPluginConfig, config)
+    dumped = validated.model_dump(mode="python", exclude_none=True)
+    return _strip_none_deep(dumped)
+
+
 # --------------------------------------------------------------------------- #
 # 配置模型
 # --------------------------------------------------------------------------- #
@@ -1089,7 +1114,8 @@ class RssReaderPlugin(MaiBotPlugin):
         normalized, changed = super().normalize_plugin_config(config_data)
         migrated, migrated_changed = _migrate_legacy_baked_defaults(normalized)
         flattened, flattened_changed = _migrate_nested_stream_feeds(migrated)
-        return flattened, changed or migrated_changed or flattened_changed
+        persistable = _dump_config_for_persist(flattened)
+        return persistable, changed or migrated_changed or flattened_changed or persistable != flattened
 
     async def on_load(self) -> None:
         self._state = RssState(self._plugin_dir / "rss_state.json")
