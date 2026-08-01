@@ -11,3 +11,6 @@ rss_bot_feeds.json.*
 .pytest_cache/
 .mypy_cache/
 .DS_Store
+
+# 运行期配置（由 Host/WebUI 写回；模板见 config.default.toml）
+config.toml
